@@ -1,0 +1,49 @@
+lotteries:
+  daily:
+    main_count: 5
+    max_main: 36
+    has_bonus: false
+  lotto:
+    main_count: 6
+    max_main: 52
+    has_bonus: true
+    bonus_max: 20
+  lotto_plus1:
+    main_count: 6
+    max_main: 52
+    has_bonus: true
+    bonus_max: 20
+  lotto_plus2:
+    main_count: 6
+    max_main: 52
+    has_bonus: true
+    bonus_max: 20
+  powerball:
+    main_count: 5
+    max_main: 50
+    has_bonus: true
+    bonus_max: 20
+  powerball_plus:
+    main_count: 5
+    max_main: 50
+    has_bonus: true
+    bonus_max: 20
+  daily_lotto:
+    main_count: 5
+    max_main: 36
+    has_bonus: false
+  daily_lotto_plus1:
+    main_count: 5
+    max_main: 36
+    has_bonus: false
+  sportstake:
+    main_count: 6
+    max_main: 4          # outcomes 1,2,3 (or 0-3) – adjust if needed
+    has_bonus: false
+  sportstake_8:
+    main_count: 8
+    max_main: 4
+    has_bonus: false
+
+analysis:
+  use_last_n_draws: null   # null = all draws; integer = last N draws only
