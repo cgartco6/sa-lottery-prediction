@@ -5,11 +5,11 @@ import numpy as np
 from pathlib import Path
 from collections import Counter
 import sys
+import re
 
 # ============================================================
-# OFFICIAL FILENAMES (exactly as downloaded from the site)
+# OFFICIAL FILENAMES (exactly as downloaded)
 # ============================================================
-# Map official CSV filename (without .csv) to lottery rules
 LOTTERY_RULES = {
     "DAILYLOTTO-RESULTS":          {"main_count": 5, "max_main": 36, "has_bonus": False},
     "DAILYLOTTO-PLUS-RESULTS":     {"main_count": 5, "max_main": 36, "has_bonus": False},
@@ -23,8 +23,61 @@ LOTTERY_RULES = {
 }
 # ============================================================
 
+def find_number_columns(df, main_count, filename):
+    """
+    Find ball columns: expects 'ball1', 'ball2', ... up to main_count.
+    """
+    # First, look for exact 'ballX' pattern
+    candidates = []
+    for i in range(1, main_count + 1):
+        col_name = f"ball{i}"
+        if col_name in df.columns:
+            candidates.append(col_name)
+        else:
+            # Also try alternative: 'ball0i' for single digit? Not needed.
+            pass
+    
+    if len(candidates) == main_count:
+        return candidates
+    
+    # Fallback: any column with 'ball' followed by digits, sorted by the number
+    all_ball_cols = []
+    for col in df.columns:
+        match = re.search(r'ball(\d+)', col, re.IGNORECASE)
+        if match:
+            num = int(match.group(1))
+            all_ball_cols.append((num, col))
+    all_ball_cols.sort()
+    if len(all_ball_cols) >= main_count:
+        return [col for _, col in all_ball_cols[:main_count]]
+    
+    # Last resort: take first N numeric columns that are not dates/payouts
+    exclude = re.compile(r'date|payout|div|draw|next|jackpot', re.IGNORECASE)
+    numeric_cols = []
+    for col in df.columns:
+        if exclude.search(col):
+            continue
+        try:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                numeric_cols.append(col)
+        except:
+            pass
+    if len(numeric_cols) >= main_count:
+        return numeric_cols[:main_count]
+    
+    raise ValueError(f"Cannot find {main_count} ball columns in {filename}")
+
+def find_bonus_column(df, filename):
+    """Find bonus ball column (usually 'bonusball' or 'bonus ball')."""
+    for col in df.columns:
+        if 'bonus' in col.lower():
+            # Ensure it's not a payout column
+            if not any(x in col.lower() for x in ['payout', 'div']):
+                return col
+    return None
+
 # ------------------------------------------------------------------
-# Helper classes (no external dependencies beyond pandas/numpy)
+# Helper classes (same logic, but clean)
 # ------------------------------------------------------------------
 class DataProcessor:
     @staticmethod
@@ -150,7 +203,6 @@ class TicketChecker:
         bonus_match = 0
         if ticket.get('bonus') is not None and draw.get('bonus') is not None:
             bonus_match = 1 if ticket['bonus'] == draw['bonus'] else 0
-        # Determine base key for prize lookup
         if 'SPORTSTAKE-1X2' in lottery_type:
             base = 'sportstake'
         elif 'SPORTSTAKE-SS08' in lottery_type:
@@ -175,16 +227,13 @@ def main():
     parser.add_argument('--lottery', default='all', help='Specific lottery (e.g., LOTTO-RESULTS)')
     args = parser.parse_args()
 
-    # Locate data/raw folder
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     data_dir = project_root / 'data' / 'raw'
     if not data_dir.exists():
         print(f"ERROR: Data folder not found: {data_dir}")
-        print("Please create 'data/raw' folder and put your CSV files inside.")
         sys.exit(1)
 
-    # Process each CSV that matches our known rules
     for csv_name, cfg in LOTTERY_RULES.items():
         if args.lottery != 'all' and csv_name != args.lottery:
             continue
@@ -197,45 +246,34 @@ def main():
         max_main = cfg['max_main']
         main_count = cfg['main_count']
 
-        # Load CSV
         df = pd.read_csv(csv_path)
 
-        # --- Column detection ---
-        # Official files have columns like "Ball 1", "Ball 2", ..., "Bonus Ball" (or similar)
-        # We'll look for columns that contain 'ball' or 'number' followed by a digit
-        main_cols = []
-        for col in df.columns:
-            col_lower = col.lower()
-            if ('ball' in col_lower or 'number' in col_lower) and any(str(i) in col for i in range(1,10)):
-                main_cols.append(col)
-        # Also try 'draw number'? No, that's draw ID.
-        # If not found, fallback to first N columns (skip first if it's date/draw number)
-        if len(main_cols) < main_count:
-            # Try columns that are purely numeric names
-            possible = [c for c in df.columns if c.replace('.','').isdigit() or c.isdigit()]
-            if len(possible) >= main_count:
-                main_cols = possible[:main_count]
-            else:
-                # Last resort: assume first main_count columns after the first column (which might be date/draw no.)
-                main_cols = df.columns[1:1+main_count].tolist()
-
-        if len(main_cols) < main_count:
-            print(f"Could not find {main_count} main number columns in {csv_name}. Found: {main_cols}")
+        # Find main number columns
+        try:
+            main_cols = find_number_columns(df, main_count, csv_name)
+        except Exception as e:
+            print(f"Error processing {csv_name}: {e}")
+            print("Columns found:", df.columns.tolist())
             continue
 
-        main_cols = main_cols[:main_count]
+        # Convert to numeric, coerce errors to NaN
+        for col in main_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Extract main numbers row by row, drop rows with any NaN in main_cols
         df['main_numbers'] = df[main_cols].values.tolist()
-        df['main_numbers'] = df['main_numbers'].apply(lambda row: [int(x) for x in row])
+        df['main_numbers'] = df['main_numbers'].apply(lambda row: [int(x) for x in row if pd.notna(x)])
+        # Keep only rows where we have exactly main_count numbers
+        df = df[df['main_numbers'].apply(len) == main_count]
+        if len(df) == 0:
+            print(f"No valid rows (all have missing numbers) in {csv_name}")
+            continue
 
-        # Bonus column detection
+        # Bonus column
         if has_bonus:
-            bonus_col = None
-            for col in df.columns:
-                if 'bonus' in col.lower():
-                    bonus_col = col
-                    break
+            bonus_col = find_bonus_column(df, csv_name)
             if bonus_col:
-                df['bonus'] = df[bonus_col]
+                df['bonus'] = pd.to_numeric(df[bonus_col], errors='coerce')
             else:
                 df['bonus'] = None
         else:
@@ -245,12 +283,11 @@ def main():
         df = DataProcessor.add_group_columns(df, has_bonus, max_main)
 
         # Analyze and predict
-        analyzer = GroupAnalyzer(df, has_bonus, use_last_n=None)  # all draws
+        analyzer = GroupAnalyzer(df, has_bonus, use_last_n=None)
         pred_groups = analyzer.predict_next_groups()
         predictor = NumberPredictor(df, has_bonus, max_main, main_count)
         pred_numbers = predictor.generate_prediction(pred_groups)
 
-        # Get hot numbers from all draws
         all_mains = [n for sub in df['main_numbers'] for n in sub]
         top_mains = pd.Series(all_mains).value_counts().head(15).index.tolist()
         optimizer = TicketOptimizer(top_mains, pred_numbers.get('bonus'), max_main, main_count)
@@ -258,7 +295,8 @@ def main():
         print("="*70)
         print(f"  {csv_name}  |  Predicted group pattern: {pred_groups}")
         print("="*70)
-        print(f"  🎯 Suggested focus numbers: {pred_numbers['main']}", end='')
+        focus = [int(x) for x in pred_numbers['main']]
+        print(f"  🎯 Suggested focus numbers: {focus}", end='')
         if has_bonus and pred_numbers.get('bonus'):
             print(f"  + Bonus: {pred_numbers['bonus']}")
         else:
@@ -283,7 +321,7 @@ def main():
                 if res['tier'] != 'No win':
                     winners.append((idx+1, res))
             if winners:
-                # Try to get date column (often 'Draw Date' or 'Date')
+                # Try to find a date column
                 date_col = None
                 for col in df.columns:
                     if 'date' in col.lower():
